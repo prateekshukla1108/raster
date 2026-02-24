@@ -96,11 +96,11 @@ h1 {
 
 h2 {
   margin: 0 0 0.1rem;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--ink);
 }
 
 p {
@@ -248,9 +248,9 @@ label {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  font-size: 0.73rem;
-  font-weight: 500;
-  letter-spacing: 0.05em;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--ink-dim);
 }
@@ -431,11 +431,11 @@ input[type="range"] {
 
 .stat .k {
   display: block;
-  color: var(--ink-faint);
-  font-size: 0.67rem;
+  color: var(--ink-dim);
+  font-size: 0.7rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.06em;
   margin-bottom: 0.2rem;
 }
 
@@ -460,8 +460,8 @@ input[type="range"] {
 
 .hint {
   margin: 0.28rem 0 0;
-  font-size: 0.77rem;
-  color: var(--ink-faint);
+  font-size: 0.8rem;
+  color: var(--ink-dim);
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -479,7 +479,7 @@ input[type="range"] {
   gap: 0.38rem;
   align-items: center;
   color: var(--ink-dim);
-  font-size: 0.72rem;
+  font-size: 0.76rem;
   letter-spacing: 0.02em;
 }
 
