@@ -8,9 +8,9 @@
   --glass: rgba(8, 15, 35, 0.72);
   --glass-hi: rgba(14, 24, 52, 0.88);
   --glass-mid: rgba(10, 18, 40, 0.6);
-  --ink: #e8f0ff;
-  --ink-dim: #8fa8cc;
-  --ink-faint: #647d9c;
+  --ink: #edf3ff;
+  --ink-dim: #aec4e0;
+  --ink-faint: #8aa4c2;
   --border: rgba(100, 140, 210, 0.18);
   --border-mid: rgba(100, 140, 210, 0.32);
 
@@ -106,7 +106,7 @@ h2 {
 p {
   margin: 0.4rem 0 0;
   color: var(--ink-dim);
-  font-size: 0.88rem;
+  font-size: 0.9rem;
 }
 
 code {
