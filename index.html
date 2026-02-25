@@ -4,118 +4,157 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rasterization + Swizzle Visualizer</title>
-    <meta name="description" content="Interactive CUDA-style tile scheduling and swizzle visualizer powered by D3.js" />
+    <meta
+      name="description"
+      content="Interactive CUDA-style tile scheduling and swizzle visualizer powered by D3.js"
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <!-- ── HEADER ─────────────────────────────────────────── -->
-    <header class="hero">
-      <div class="hero-copy">
-        <h1>Rasterization + Swizzle Visualizer</h1>
-        <p>
-          Interactive deep-dive into CUDA-style tile scheduling from
-          <code>rasterization.cu</code> — powered by D3.js
-        </p>
-      </div>
-      <div class="badge">D3.js · CUDA Mapping</div>
-    </header>
-
-    <!-- ── MAIN CONTENT ───────────────────────────────────── -->
-    <main class="layout">
-
-      <!-- Configuration Card -->
-      <section class="card controls" aria-labelledby="cfg-title">
-        <h2 id="cfg-title">Configuration</h2>
-        <div class="grid-controls">
-          <label for="tilesM">Tiles M <input type="number" id="tilesM" min="1" max="256" value="14" /></label>
-          <label for="tilesN">Tiles N <input type="number" id="tilesN" min="1" max="256" value="10" /></label>
-          <label for="batches">Batches <input type="number" id="batches" min="1" max="8" value="1" /></label>
-          <label for="clusterM">Cluster M <input type="number" id="clusterM" min="1" max="8" value="2" /></label>
-          <label for="clusterN">Cluster N <input type="number" id="clusterN" min="1" max="8" value="2" /></label>
-          <label for="maxSwizzle">Max Swizzle
-            <select id="maxSwizzle">
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="4" selected>4</option>
-              <option value="8">8</option>
-            </select>
-          </label>
-          <label for="rasterOrder">Raster Order
-            <select id="rasterOrder">
-              <option value="Heuristic" selected>Heuristic</option>
-              <option value="AlongM">AlongM</option>
-              <option value="AlongN">AlongN</option>
-            </select>
-          </label>
-          <button id="rebuild">Rebuild Mapping</button>
-        </div>
-      </section>
-
-      <!-- Playback Card -->
-      <section class="card playback" aria-labelledby="pb-title">
-        <h2 id="pb-title">Traversal Playback</h2>
-        <div class="play-row">
-          <button id="playPause">Play</button>
-          <label for="speed">Speed
-            <input type="range" id="speed" min="20" max="600" value="160" />
-          </label>
-          <label for="batch">Batch
-            <input type="range" id="batch" min="0" max="0" step="1" value="0" />
-          </label>
-        </div>
-        <label class="wide" for="linearIndex">Linear Index
-          <input type="range" id="linearIndex" min="0" max="0" step="1" value="0" />
-        </label>
-        <div id="decodeInfo" class="decode-info" role="log" aria-live="polite"></div>
-      </section>
-
-      <!-- Stats Card -->
-      <section class="card stats" id="statsPanel" aria-labelledby="stats-title"></section>
-
-      <!-- Tile Traversal Chart -->
-      <section class="card chart-card" aria-labelledby="tile-title">
-        <div class="chart-head">
-          <div>
-            <h2 id="tile-title">Tile Traversal <span style="color:var(--ink-faint);font-weight:400;text-transform:none;letter-spacing:0">— current batch</span></h2>
-            <p class="hint">Gray tiles are padded (outside logical problem extent).</p>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="hero-kicker">CUDA Tile Scheduling Studio</p>
+        <div class="hero-main">
+          <div class="hero-copy">
+            <h1>Rasterization + Swizzle Visualizer</h1>
+            <p>
+              Interactive deep-dive into raster order, padded grids, and swizzled cluster IDs from
+              <code>rasterization.cu</code>.
+            </p>
           </div>
-          <div class="legend">
-            <span><i class="swatch order"></i>Traversal order</span>
-            <span><i class="swatch padded"></i>Padded tile</span>
-            <span><i class="swatch active"></i>Current tile</span>
+          <div class="hero-meta" aria-label="Feature badges and theme controls">
+            <button
+              id="themeToggle"
+              class="theme-toggle"
+              type="button"
+              aria-label="Toggle theme"
+              aria-pressed="false"
+            >
+              Dark Mode
+            </button>
+            <span class="badge">CUDA Mapping</span>
           </div>
         </div>
-        <svg id="tileMap" width="900" height="530" aria-label="Tile traversal map"></svg>
-      </section>
+      </header>
 
-      <!-- Cluster Swizzle Chart -->
-      <section class="card chart-card" aria-labelledby="cluster-title">
-        <div class="chart-head">
-          <div>
-            <h2 id="cluster-title">Cluster Swizzle View</h2>
-            <p class="hint">Cluster-level strip-mined swizzle from decode/encode of swizzled IDs.</p>
+      <main class="layout">
+        <section class="pane pane-main" aria-labelledby="workbench-title">
+          <div class="pane-head">
+            <h2 id="workbench-title">Visualization Workbench</h2>
+            <p>Configuration, traversal controls, and both visual maps in one pane.</p>
           </div>
-          <div class="legend">
-            <span><i class="swatch cluster"></i>Swizzle rank</span>
-            <span><i class="swatch active"></i>Active cluster</span>
+          <div class="pane-split">
+            <section class="pane-block controls" aria-labelledby="cfg-title">
+              <div class="section-head">
+                <h2 id="cfg-title">Configuration</h2>
+                <p>Tune logical shape, cluster shape, and swizzle behavior.</p>
+              </div>
+              <div class="grid-controls">
+                <label for="tilesM">Tiles M <input type="number" id="tilesM" min="1" max="256" value="8" /></label>
+                <label for="tilesN">Tiles N <input type="number" id="tilesN" min="1" max="256" value="16" /></label>
+                <label for="batches">Batches <input type="number" id="batches" min="1" max="8" value="1" /></label>
+                <label for="clusterM">Cluster M <input type="number" id="clusterM" min="1" max="8" value="1" /></label>
+                <label for="clusterN">Cluster N <input type="number" id="clusterN" min="1" max="8" value="2" /></label>
+                <label for="maxSwizzle">Max Swizzle
+                  <select id="maxSwizzle">
+                    <option value="1">1</option>
+                    <option value="2" selected>2</option>
+                    <option value="4">4</option>
+                    <option value="8">8</option>
+                  </select>
+                </label>
+                <label for="rasterOrder">Raster Order
+                  <select id="rasterOrder">
+                    <option value="Heuristic" selected>Heuristic</option>
+                    <option value="AlongM">AlongM</option>
+                    <option value="AlongN">AlongN</option>
+                  </select>
+                </label>
+                <button id="rebuild">Rebuild Mapping</button>
+              </div>
+            </section>
+
+            <section class="pane-block playback" aria-labelledby="pb-title">
+              <div class="section-head">
+                <h2 id="pb-title">Traversal Playback</h2>
+                <p>Scrub through the decode path tile-by-tile.</p>
+              </div>
+              <div class="play-row">
+                <button id="playPause">Play</button>
+                <label for="speed">Speed
+                  <input type="range" id="speed" min="20" max="600" value="160" />
+                </label>
+                <label for="batch">Batch
+                  <input type="range" id="batch" min="0" max="0" step="1" value="0" />
+                </label>
+              </div>
+              <label class="wide" for="linearIndex">Linear Index
+                <input type="range" id="linearIndex" min="0" max="0" step="1" value="0" />
+              </label>
+            </section>
           </div>
-        </div>
-        <svg id="clusterMap" width="900" height="340" aria-label="Cluster swizzle map"></svg>
-      </section>
 
-    </main>
+          <section class="pane-block chart-panel" aria-labelledby="tile-title">
+            <div class="chart-head">
+              <div>
+                <h2 id="tile-title">Tile Traversal</h2>
+                <p class="hint">A/B slice highlights show the active C-tile dependencies for the selected step.</p>
+              </div>
+              <div class="legend">
+                <span><i class="swatch order"></i>Traversal order</span>
+                <span><i class="swatch aslice"></i>A slice</span>
+                <span><i class="swatch bslice"></i>B slice</span>
+                <span><i class="swatch padded"></i>Padded tile</span>
+                <span><i class="swatch active"></i>Current C tile</span>
+              </div>
+            </div>
+            <svg id="tileMap" width="900" height="530" aria-label="Tile traversal map"></svg>
+          </section>
 
-    <!-- ── FOOTER ──────────────────────────────────────────── -->
-    <footer>
-      Logic mirrored from <code>/rasterization.cu</code>: padded grid, raster order selection,
-      and swizzled cluster ID math.
-    </footer>
+          <section class="pane-block chart-panel" aria-labelledby="cluster-title">
+            <div class="chart-head">
+              <div>
+                <h2 id="cluster-title">Cluster Swizzle View</h2>
+                <p class="hint">Cluster decode/encode flow sorted by effective swizzle rank.</p>
+              </div>
+              <div class="legend">
+                <span><i class="swatch cluster"></i>Swizzle rank</span>
+                <span><i class="swatch active"></i>Active cluster</span>
+              </div>
+            </div>
+            <svg id="clusterMap" width="900" height="340" aria-label="Cluster swizzle map"></svg>
+          </section>
+        </section>
+
+        <section class="pane pane-logic" aria-labelledby="logic-pane-title">
+          <div class="pane-head">
+            <h2 id="logic-pane-title">Logic + Derived State</h2>
+            <p>Linear index decode trace and derived metrics together in one pane.</p>
+          </div>
+
+          <section class="pane-block logic-panel" aria-labelledby="logic-title">
+            <div>
+              <h2 id="logic-title">Linear Index Decode</h2>
+              <p class="hint">Current index decode + encode round-trip details.</p>
+            </div>
+            <div id="decodeInfo" class="decode-info" role="log" aria-live="polite"></div>
+          </section>
+
+          <section class="pane-block stats" id="statsPanel" aria-labelledby="stats-title"></section>
+        </section>
+      </main>
+
+      <footer>
+        Logic mirrored from <code>/rasterization.cu</code>: padded grid alignment, raster order
+        selection, and swizzled cluster ID math.
+      </footer>
+    </div>
 
     <div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>
 
