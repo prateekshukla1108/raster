@@ -7,6 +7,9 @@ const RasterOrderOption = Object.freeze({
   AlongN: "AlongN"
 });
 
+const H100_SM_COUNT = 132;
+const SM90_MAX_SM_PER_GPC = 18;
+
 class Rasterizer {
   static kInvalidLinearIndex = -1;
 
@@ -280,9 +283,12 @@ class Rasterizer {
 const els = {
   tilesM: document.getElementById("tilesM"),
   tilesN: document.getElementById("tilesN"),
+  tileSizeM: document.getElementById("tileSizeM"),
+  tileSizeN: document.getElementById("tileSizeN"),
   batches: document.getElementById("batches"),
   clusterM: document.getElementById("clusterM"),
   clusterN: document.getElementById("clusterN"),
+  maxActiveClusters: document.getElementById("maxActiveClusters"),
   maxSwizzle: document.getElementById("maxSwizzle"),
   rasterOrder: document.getElementById("rasterOrder"),
   rebuild: document.getElementById("rebuild"),
@@ -290,21 +296,33 @@ const els = {
   speed: document.getElementById("speed"),
   batch: document.getElementById("batch"),
   linearIndex: document.getElementById("linearIndex"),
+  geometryInfo: document.getElementById("geometryInfo"),
   decodeInfo: document.getElementById("decodeInfo"),
   statsPanel: document.getElementById("statsPanel"),
   tileMap: document.getElementById("tileMap"),
   clusterMap: document.getElementById("clusterMap"),
+  tabTraversal: document.getElementById("tabTraversal"),
+  tabH100: document.getElementById("tabH100"),
+  tabTraversalPanel: document.getElementById("tabTraversalPanel"),
+  tabH100Panel: document.getElementById("tabH100Panel"),
+  h100Summary: document.getElementById("h100Summary"),
+  blockAssignmentMap: document.getElementById("blockAssignmentMap"),
+  smOccupancyMap: document.getElementById("smOccupancyMap"),
   tooltip: document.getElementById("tooltip"),
   themeToggle: document.getElementById("themeToggle")
 };
 
 const state = {
   rasterizer: null,
+  geometry: null,
   localLinearIndex: 0,
   batch: 0,
   playing: false,
   timer: null,
+  activeTab: "traversal",
   batchCache: new Map(),
+  h100BatchCache: new Map(),
+  h100Global: null,
   selfCheck: null
 };
 
@@ -314,6 +332,19 @@ const THEME_DARK = "dark";
 
 function clamp(value, lo, hi) {
   return Math.max(lo, Math.min(hi, value));
+}
+
+function ceilDiv(value, divisor) {
+  if (divisor <= 0) {
+    return 0;
+  }
+  return Math.trunc((value + divisor - 1) / divisor);
+}
+
+function getSvgViewportSize(el) {
+  const width = el.clientWidth || Number(el.getAttribute("width")) || 0;
+  const height = el.clientHeight || Number(el.getAttribute("height")) || 0;
+  return { width, height };
 }
 
 function cssVar(name, fallback) {
@@ -418,21 +449,46 @@ function initializeTheme() {
   applyTheme(initialTheme, { persist: false, rerender: false });
 }
 
-// Returns black or white depending on perceived luminance of a hex/rgb color string.
-function contrastColor(fill) {
+function contrastStyle(fill) {
   try {
-    const c = d3.color(fill);
-    if (!c) return cssVar("--ink", "#142744");
-    // sRGB luminance coefficients
+    const sample = d3.color(fill);
+    const darkValue = "#08111f";
+    const lightValue = "#f7fbff";
+    const dark = d3.color(darkValue);
+    const light = d3.color(lightValue);
+    if (!sample || !dark || !light) {
+      return { fill: darkValue, stroke: "rgba(247,251,255,0.42)" };
+    }
+
     const toLinear = (ch) => {
       const s = ch / 255;
       return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
     };
-    const L = 0.2126 * toLinear(c.r) + 0.7152 * toLinear(c.g) + 0.0722 * toLinear(c.b);
-    return L > 0.46 ? cssVar("--ink", "#142744") : "rgba(240,246,255,0.92)";
+    const luminance = (color) =>
+      0.2126 * toLinear(color.r) + 0.7152 * toLinear(color.g) + 0.0722 * toLinear(color.b);
+    const contrastRatio = (a, b) => {
+      const l1 = luminance(a);
+      const l2 = luminance(b);
+      const hi = Math.max(l1, l2);
+      const lo = Math.min(l1, l2);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+
+    const useDark = contrastRatio(sample, dark) >= contrastRatio(sample, light);
+    return useDark
+      ? { fill: darkValue, stroke: "rgba(247,251,255,0.42)" }
+      : { fill: lightValue, stroke: "rgba(8,17,31,0.42)" };
   } catch (_) {
-    return "rgba(240,246,255,0.92)";
+    return { fill: "#08111f", stroke: "rgba(247,251,255,0.42)" };
   }
+}
+
+function contrastColor(fill) {
+  return contrastStyle(fill).fill;
+}
+
+function contrastStroke(fill) {
+  return contrastStyle(fill).stroke;
 }
 
 function readInt(el, fallback, lo, hi) {
@@ -441,6 +497,306 @@ function readInt(el, fallback, lo, hi) {
     return fallback;
   }
   return clamp(parsed, lo, hi);
+}
+
+function getGeometry() {
+  return (
+    state.geometry || {
+      tile_m: 128,
+      tile_n: 128,
+      matrix_m: 1024,
+      matrix_n: 2048
+    }
+  );
+}
+
+function buildGeometry(problem) {
+  const tile_m = readInt(els.tileSizeM, 128, 16, 2048);
+  const tile_n = readInt(els.tileSizeN, 128, 16, 2048);
+  return {
+    tile_m,
+    tile_n,
+    matrix_m: problem.tiles_m * tile_m,
+    matrix_n: problem.tiles_n * tile_n
+  };
+}
+
+function blendColors(from, to, ratio) {
+  return d3.interpolateRgb(from, to)(clamp(ratio, 0, 1));
+}
+
+function tileElementBounds(tileM, tileN) {
+  const geometry = getGeometry();
+  return {
+    rowStart: tileM * geometry.tile_m,
+    rowEnd: (tileM + 1) * geometry.tile_m,
+    colStart: tileN * geometry.tile_n,
+    colEnd: (tileN + 1) * geometry.tile_n
+  };
+}
+
+function formatTileBounds(tileM, tileN) {
+  const bounds = tileElementBounds(tileM, tileN);
+  return `rows [${bounds.rowStart}, ${bounds.rowEnd}), cols [${bounds.colStart}, ${bounds.colEnd})`;
+}
+
+function getMaxCtaOccupancy(maxSmPerGpc, clusterShape, smCount) {
+  const clusterSize = clusterShape.m * clusterShape.n;
+  const minNumGpc = smCount < maxSmPerGpc ? 1 : Math.trunc(smCount / maxSmPerGpc);
+  const maxCtaOccupancyPerGpc = maxSmPerGpc - (maxSmPerGpc % clusterSize);
+  let ctaPerDevice = minNumGpc * maxCtaOccupancyPerGpc;
+  const numGpcResidual = smCount < maxSmPerGpc ? 0 : smCount % maxSmPerGpc;
+  const residualOccupancy = numGpcResidual - (numGpcResidual % clusterSize);
+  ctaPerDevice += residualOccupancy;
+  return Math.min(smCount, ctaPerDevice);
+}
+
+function getH100HardwareInfo() {
+  return {
+    smCount: H100_SM_COUNT,
+    maxActiveClusters: els.maxActiveClusters ? readInt(els.maxActiveClusters, 0, 0, H100_SM_COUNT) : 0
+  };
+}
+
+function formatSchedulerSource(scheduler) {
+  switch (scheduler.launchSource) {
+    case "single_cta":
+      return "single-CTA path";
+    case "max_active_clusters":
+      return "max_active_clusters path";
+    default:
+      return "18-SM/GPC heuristic";
+  }
+}
+
+function describeSchedulerSource(scheduler) {
+  if (scheduler.launchSource === "single_cta") {
+    return "Cluster size is 1, so CUTLASS launches up to sm_count resident CTAs directly.";
+  }
+
+  if (scheduler.launchSource === "max_active_clusters") {
+    return `Using hw_info.max_active_clusters=${scheduler.appliedMaxActiveClusters}, matching the CUTLASS SM90 get_grid_shape() fast path for cluster launches.`;
+  }
+
+  if (scheduler.requestedMaxActiveClusters > 0) {
+    return `Requested max_active_clusters=${scheduler.requestedMaxActiveClusters} cannot be applied for cluster ${scheduler.cluster.m} x ${scheduler.cluster.n} on an H100-sized ${scheduler.smCount}-SM budget, so CUTLASS falls back to the 18-SM/GPC occupancy heuristic.`;
+  }
+
+  return "Using the same CUTLASS SM90 occupancy heuristic with max_sm_per_gpc=18 because max_active_clusters was not provided.";
+}
+
+function buildH100Scheduler(rasterizer) {
+  const hwInfo = getH100HardwareInfo();
+  const cluster = rasterizer.clusterShape();
+  const totalTiles = rasterizer.totalTiles();
+  const clusterSize = cluster.m * cluster.n;
+  const rasterOrder = rasterizer.rasterOrder();
+  const smCount = hwInfo.smCount;
+  const requestedMaxActiveClusters = hwInfo.maxActiveClusters;
+  const grid = rasterOrder === RasterOrder.AlongN ? { x: cluster.m, y: 1, z: 1 } : { x: 1, y: cluster.n, z: 1 };
+  const truncate = (candidate, limit) => Math.min(candidate, limit);
+  let launchSource = "occupancy_heuristic";
+  let appliedMaxActiveClusters = 0;
+
+  if (clusterSize === 1) {
+    launchSource = "single_cta";
+    if (rasterOrder === RasterOrder.AlongN) {
+      grid.y = truncate(smCount, totalTiles);
+    } else {
+      grid.x = truncate(smCount, totalTiles);
+    }
+  } else if (requestedMaxActiveClusters > 0 && requestedMaxActiveClusters * clusterSize <= smCount) {
+    launchSource = "max_active_clusters";
+    appliedMaxActiveClusters = requestedMaxActiveClusters;
+    if (rasterOrder === RasterOrder.AlongN) {
+      grid.y = truncate(appliedMaxActiveClusters * cluster.n, Math.trunc(totalTiles / cluster.m));
+    } else {
+      grid.x = truncate(appliedMaxActiveClusters * cluster.m, Math.trunc(totalTiles / cluster.n));
+    }
+  } else {
+    const ctaPerDevice = getMaxCtaOccupancy(SM90_MAX_SM_PER_GPC, cluster, smCount);
+    if (rasterOrder === RasterOrder.AlongN) {
+      grid.y = truncate(Math.trunc(ctaPerDevice / cluster.m), Math.trunc(totalTiles / cluster.m));
+    } else {
+      grid.x = truncate(Math.trunc(ctaPerDevice / cluster.n), Math.trunc(totalTiles / cluster.n));
+    }
+  }
+
+  const launchedBlocks = Math.max(1, grid.x * grid.y * grid.z);
+  const residentClusters = Math.max(1, Math.trunc(launchedBlocks / Math.max(1, clusterSize)));
+
+  return {
+    smCount,
+    rasterOrder,
+    cluster,
+    clusterSize,
+    grid,
+    launchedBlocks,
+    residentClusters,
+    totalTiles,
+    requestedMaxActiveClusters,
+    appliedMaxActiveClusters,
+    launchSource,
+    totalWaves: ceilDiv(totalTiles, launchedBlocks),
+    linearization:
+      rasterOrder === RasterOrder.AlongN
+        ? "slot = blockIdx.x + blockIdx.y * gridDim.x"
+        : "slot = blockIdx.x * gridDim.y + blockIdx.y"
+  };
+}
+
+function slotToBlockCoord(slot, scheduler) {
+  if (slot < 0 || slot >= scheduler.launchedBlocks) {
+    return { x: -1, y: -1, z: 0 };
+  }
+
+  if (scheduler.rasterOrder === RasterOrder.AlongN) {
+    return {
+      x: slot % scheduler.grid.x,
+      y: Math.trunc(slot / scheduler.grid.x),
+      z: 0
+    };
+  }
+
+  return {
+    x: Math.trunc(slot / scheduler.grid.y),
+    y: slot % scheduler.grid.y,
+    z: 0
+  };
+}
+
+function getPersistentAssignment(linear, scheduler) {
+  if (!scheduler || scheduler.launchedBlocks <= 0) {
+    return { slot: -1, wave: -1, block: { x: -1, y: -1, z: 0 } };
+  }
+
+  const slot = linear % scheduler.launchedBlocks;
+  return {
+    slot,
+    wave: Math.trunc(linear / scheduler.launchedBlocks),
+    block: slotToBlockCoord(slot, scheduler)
+  };
+}
+
+function buildH100GlobalModel() {
+  const r = state.rasterizer;
+  const scheduler = buildH100Scheduler(r);
+  const slotStats = Array.from({ length: H100_SM_COUNT }, (_, slot) => {
+    const active = slot < scheduler.launchedBlocks;
+    return {
+      slot,
+      active,
+      block: active ? slotToBlockCoord(slot, scheduler) : { x: -1, y: -1, z: 0 },
+      totalAssigned: 0,
+      logicalAssigned: 0,
+      paddedAssigned: 0,
+      firstLinear: null,
+      lastLinear: null,
+      firstLogicalTile: null,
+      samples: [],
+      waveMin: null,
+      waveMax: null
+    };
+  });
+
+  for (let linear = 0; linear < r.totalTiles(); linear += 1) {
+    const tile = r.decode(linear);
+    const assignment = getPersistentAssignment(linear, scheduler);
+    const slot = slotStats[assignment.slot];
+    if (!slot) {
+      continue;
+    }
+
+    slot.totalAssigned += 1;
+    slot.firstLinear = slot.firstLinear ?? linear;
+    slot.lastLinear = linear;
+    slot.waveMin = slot.waveMin === null ? assignment.wave : Math.min(slot.waveMin, assignment.wave);
+    slot.waveMax = slot.waveMax === null ? assignment.wave : Math.max(slot.waveMax, assignment.wave);
+
+    if (tile.in_bounds) {
+      slot.logicalAssigned += 1;
+      if (!slot.firstLogicalTile) {
+        slot.firstLogicalTile = { m: tile.m, n: tile.n, l: tile.l, wave: assignment.wave, linear };
+      }
+      if (slot.samples.length < 4) {
+        slot.samples.push({ m: tile.m, n: tile.n, l: tile.l, wave: assignment.wave, linear });
+      }
+    } else {
+      slot.paddedAssigned += 1;
+    }
+  }
+
+  return { scheduler, slotStats };
+}
+
+function getH100GlobalModel() {
+  if (!state.h100Global) {
+    state.h100Global = buildH100GlobalModel();
+  }
+  return state.h100Global;
+}
+
+function getH100BatchData(batch) {
+  if (state.h100BatchCache.has(batch)) {
+    return state.h100BatchCache.get(batch);
+  }
+
+  const r = state.rasterizer;
+  const scheduler = getH100GlobalModel().scheduler;
+  const cells = [];
+
+  for (let local = 0; local < r.tilesPerBatch(); local += 1) {
+    const globalLinear = batch * r.tilesPerBatch() + local;
+    const tile = r.decode(globalLinear);
+    const assignment = getPersistentAssignment(globalLinear, scheduler);
+
+    cells.push({
+      m: tile.m,
+      n: tile.n,
+      key: `${tile.m},${tile.n}`,
+      inBounds: tile.in_bounds,
+      globalLinear,
+      localLinear: local,
+      slot: assignment.slot,
+      wave: assignment.wave,
+      blockX: assignment.block.x,
+      blockY: assignment.block.y
+    });
+  }
+
+  const cached = { cells };
+  state.h100BatchCache.set(batch, cached);
+  return cached;
+}
+
+function renderGeometryInfo() {
+  if (!els.geometryInfo || !state.rasterizer) {
+    return;
+  }
+
+  const logical = state.rasterizer.logicalShape();
+  const geometry = getGeometry();
+  els.geometryInfo.innerHTML = [
+    `<strong>Logical matrix:</strong> ${geometry.matrix_m} x ${geometry.matrix_n} output elements`,
+    `<strong>CTA tile:</strong> ${geometry.tile_m} x ${geometry.tile_n}`,
+    `<strong>Logical CTA grid:</strong> ${logical.tiles_m} x ${logical.tiles_n}`
+  ].join("<br>");
+}
+
+function setActiveTab(tab) {
+  state.activeTab = tab === "h100" ? "h100" : "traversal";
+
+  const traversalActive = state.activeTab === "traversal";
+  els.tabTraversal.classList.toggle("active", traversalActive);
+  els.tabTraversal.setAttribute("aria-selected", String(traversalActive));
+  els.tabTraversalPanel.hidden = !traversalActive;
+  els.tabTraversalPanel.classList.toggle("active", traversalActive);
+
+  const h100Active = state.activeTab === "h100";
+  els.tabH100.classList.toggle("active", h100Active);
+  els.tabH100.setAttribute("aria-selected", String(h100Active));
+  els.tabH100Panel.hidden = !h100Active;
+  els.tabH100Panel.classList.toggle("active", h100Active);
 }
 
 function classifyTileTransition(fromTile, toTile) {
@@ -615,8 +971,13 @@ function renderStats() {
   const r = state.rasterizer;
   const logical = r.logicalShape();
   const padded = r.paddedShape();
+  const geometry = getGeometry();
+  const h100 = getH100GlobalModel().scheduler;
+  const maxParallelTiles = Math.min(h100.launchedBlocks, r.totalTiles());
 
   const stats = [
+    ["Matrix", `${geometry.matrix_m} x ${geometry.matrix_n}`],
+    ["CTA Tile", `${geometry.tile_m} x ${geometry.tile_n}`],
     ["Logical", `${logical.tiles_m} x ${logical.tiles_n} x ${logical.batches}`],
     ["Padded", `${padded.tiles_m} x ${padded.tiles_n} x ${padded.batches}`],
     ["Raster", r.rasterOrder()],
@@ -624,6 +985,20 @@ function renderStats() {
     ["Tiles/Batch", String(r.tilesPerBatch())],
     ["Total Tiles", String(r.totalTiles())],
     ["Logical Tiles", String(r.logicalTileCount())],
+    ["Parallel Blocks", `${h100.launchedBlocks} / ${h100.smCount}`],
+    ["Resident Clusters", String(h100.residentClusters)],
+    [
+      "Max Active Clusters",
+      h100.appliedMaxActiveClusters > 0
+        ? String(h100.appliedMaxActiveClusters)
+        : h100.requestedMaxActiveClusters > 0
+          ? `${h100.requestedMaxActiveClusters} (fallback)`
+          : "0 (heuristic)"
+    ],
+    ["Scheduler Path", formatSchedulerSource(h100)],
+    ["Tiles / Wave", String(maxParallelTiles)],
+    ["H100 Grid", `${h100.grid.x} x ${h100.grid.y}`],
+    ["Parallel Waves", String(h100.totalWaves)],
     ["Cluster Major", String(r.clusterMajor())],
     ["Cluster Minor", String(r.clusterMinor())],
     ["Clusters Major", String(r.clustersAlongMajor())]
@@ -647,6 +1022,7 @@ function renderDecodeInfo() {
   const r = state.rasterizer;
   const linear = currentLinearIndex();
   const tile = r.decode(linear);
+  const assignment = getPersistentAssignment(linear, getH100GlobalModel().scheduler);
 
   if (!tile.valid || !tile.debug) {
     els.decodeInfo.textContent = "Invalid decode state.";
@@ -666,9 +1042,14 @@ function renderDecodeInfo() {
     `major = ${dbg.major}, minor = ${dbg.minor}`,
     `tile = (m=${tile.m}, n=${tile.n}, l=${tile.l})`,
     `valid=${tile.valid} in_bounds=${tile.in_bounds}`,
+    `h100 slot = ${assignment.slot}  wave = ${assignment.wave}  blockIdx=(${assignment.block.x}, ${assignment.block.y})`,
     `encode(logical) = ${encodeLogical}`,
     `encode(padded) = ${encodePadded}`
   ];
+
+  if (tile.in_bounds) {
+    lines.splice(lines.length - 2, 0, `matrix window = ${formatTileBounds(tile.m, tile.n)}`);
+  }
 
   els.decodeInfo.textContent = lines.join("\n");
 }
@@ -1319,12 +1700,418 @@ function renderClusterMap() {
     .text(String(Math.max(0, clusters.length - 1)));
 }
 
+function getSlotColor(slot, launchedBlocks) {
+  const ratio = launchedBlocks <= 1 ? 0.5 : slot / Math.max(1, launchedBlocks - 1);
+  const base = d3.interpolateTurbo(0.08 + ratio * 0.82);
+  const mixTarget =
+    currentTheme() === THEME_DARK ? cssVar("--surface-strong", "#172133") : cssVar("--surface-strong", "#ffffff");
+  const mixAmount = currentTheme() === THEME_DARK ? 0.14 : 0.08;
+  return blendColors(base, mixTarget, mixAmount);
+}
+
+function renderH100Summary() {
+  if (!els.h100Summary) {
+    return;
+  }
+
+  const r = state.rasterizer;
+  const logical = r.logicalShape();
+  const padded = r.paddedShape();
+  const geometry = getGeometry();
+  const { scheduler } = getH100GlobalModel();
+  const maxParallelTiles = Math.min(scheduler.launchedBlocks, r.totalTiles());
+
+  const cards = [
+    {
+      k: "Logical Matrix",
+      v: `${geometry.matrix_m} x ${geometry.matrix_n}`,
+      d: `${logical.tiles_m} x ${logical.tiles_n} logical output tiles with CTA tile ${geometry.tile_m} x ${geometry.tile_n}.`
+    },
+    {
+      k: "Padded CTA Grid",
+      v: `${padded.tiles_m} x ${padded.tiles_n}`,
+      d: `CUTLASS rounds CTA counts to swizzle=${r.swizzleSize()} and cluster=${r.clusterShape().m} x ${r.clusterShape().n}.`
+    },
+    {
+      k: "Launch Grid",
+      v: `${scheduler.grid.x} x ${scheduler.grid.y}`,
+      d: `${scheduler.launchedBlocks} resident blocks become persistent workers on an H100-sized ${scheduler.smCount}-slot budget.`
+    },
+    {
+      k: "Scheduler Path",
+      v: formatSchedulerSource(scheduler),
+      d: describeSchedulerSource(scheduler)
+    },
+    {
+      k: "Resident Clusters",
+      v: String(scheduler.residentClusters),
+      d: `Cluster shape ${scheduler.cluster.m} x ${scheduler.cluster.n} groups the launched CTAs into ${scheduler.residentClusters} concurrently resident SM90 clusters.`
+    },
+    {
+      k: "Parallel Tiles / Wave",
+      v: String(maxParallelTiles),
+      d: `The tiled workload is fanned out so each launched block owns one tile in the same wave, letting up to ${maxParallelTiles} tiles run concurrently.`
+    },
+    {
+      k: "Global Waves",
+      v: String(scheduler.totalWaves),
+      d: `After a block finishes one tile, it advances by the full launch-grid width to pick up later work in the next wave.`
+    },
+    {
+      k: "Raster Order",
+      v: r.rasterOrder(),
+      d: `Major axis = ${r.rasterOrder() === RasterOrder.AlongN ? "N" : "M"}, matching the swizzled decode path already shown in the traversal tab.`
+    },
+    {
+      k: "Batch Coverage",
+      v: `${logical.batches} batch${logical.batches === 1 ? "" : "es"}`,
+      d: `Global linear work = batch * ${r.tilesPerBatch()} + local_tile. The same persistent block mapping and wave stepping continue across batches.`
+    },
+    {
+      k: "CUTLASS Validation",
+      v: "SM90 aligned",
+      d: "Mirrors tile_scheduler_params.h get_grid_shape(), static_tile_scheduler.hpp advance_to_next_work(), and sm90_tile_scheduler.hpp get_work_idx_m_and_n()."
+    }
+  ];
+
+  const formulas = [
+    {
+      label: "Tile Geometry",
+      code: `matrix = (${logical.tiles_m} * ${geometry.tile_m}) x (${logical.tiles_n} * ${geometry.tile_n})`
+    },
+    {
+      label: "Persistent Slot",
+      code: `slot = linear_work_id % ${scheduler.launchedBlocks}`
+    },
+    {
+      label: "Parallel Wave",
+      code: `wave = floor(linear_work_id / ${scheduler.launchedBlocks})`
+    },
+    {
+      label: "Grid Stride",
+      code: `next_linear = current_linear + (${scheduler.grid.x} * ${scheduler.grid.y} * ${scheduler.grid.z})`
+    },
+    {
+      label: "Block Linearization",
+      code: scheduler.linearization
+    }
+  ];
+
+  els.h100Summary.innerHTML = `
+    <div class="summary-grid">
+      ${cards
+        .map(
+          (card) => `
+            <div class="summary-card">
+              <span class="k">${card.k}</span>
+              <span class="v">${card.v}</span>
+              <span class="d">${card.d}</span>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+    <div class="formula-strip">
+      ${formulas
+        .map(
+          (item) => `
+            <div class="formula-chip">
+              <span class="label">${item.label}</span>
+              <code>${item.code}</code>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderBlockAssignmentMap() {
+  if (!els.blockAssignmentMap) {
+    return;
+  }
+
+  const r = state.rasterizer;
+  const chartTheme = getChartTheme();
+  const padded = r.paddedShape();
+  const batchData = getH100BatchData(state.batch);
+  const { scheduler } = getH100GlobalModel();
+  const activeLinear = currentLinearIndex();
+  const activeAssignment = getPersistentAssignment(activeLinear, scheduler);
+
+  const svg = d3.select(els.blockAssignmentMap);
+  svg.selectAll("*").remove();
+
+  const { width, height } = getSvgViewportSize(els.blockAssignmentMap);
+  const margin = { top: 24, right: 38, bottom: 42, left: 48 };
+  const safePad = 10;
+  const gridWidth = width - margin.left - margin.right - safePad * 2;
+  const gridHeight = height - margin.top - margin.bottom - safePad * 2;
+  const cellSize = Math.max(
+    1.4,
+    Math.min(gridWidth / Math.max(1, padded.tiles_n), gridHeight / Math.max(1, padded.tiles_m))
+  );
+  const labelSize = clamp(cellSize * 0.28, 8, 12);
+  const originX = margin.left + safePad + (gridWidth - padded.tiles_n * cellSize) * 0.5;
+  const originY = margin.top + safePad + (gridHeight - padded.tiles_m * cellSize) * 0.5;
+  const waveStroke = blendColors(chartTheme.axis, chartTheme.active, 0.4);
+
+  const g = svg.append("g").attr("transform", `translate(${originX},${originY})`);
+
+  g.selectAll("rect")
+    .data(batchData.cells)
+    .join("rect")
+    .attr("x", (d) => d.n * cellSize)
+    .attr("y", (d) => d.m * cellSize)
+    .attr("width", cellSize)
+    .attr("height", cellSize)
+    .attr("rx", Math.min(4, cellSize * 0.18))
+    .attr("fill", (d) => {
+      const base = getSlotColor(d.slot, scheduler.launchedBlocks);
+      return d.inBounds ? base : blendColors(base, chartTheme.paddedFill, 0.7);
+    })
+    .attr("stroke", (d) => (d.globalLinear === activeLinear ? chartTheme.active : chartTheme.tileStroke))
+    .attr("stroke-width", (d) => (d.globalLinear === activeLinear ? 2.2 : Math.max(0.5, cellSize * 0.05)))
+    .style("cursor", "pointer")
+    .on("click", (_, d) => {
+      state.localLinearIndex = d.localLinear;
+      els.linearIndex.value = String(state.localLinearIndex);
+      renderAll();
+    })
+    .on("mousemove", (event, d) => {
+      const lines = [
+        `tile: (m=${d.m}, n=${d.n}, batch=${state.batch})`,
+        d.inBounds ? formatTileBounds(d.m, d.n) : "padded tile outside logical matrix",
+        `local linear: ${d.localLinear}`,
+        `global linear: ${d.globalLinear}`,
+        `persistent block: slot ${d.slot}  blockIdx=(${d.blockX}, ${d.blockY})`,
+        `wave ${d.wave}: tiles with this wave run in parallel`,
+        d.wave === activeAssignment.wave
+          ? "matches the selected tile's parallel wave"
+          : `selected tile is in wave ${activeAssignment.wave}`
+      ];
+      showTooltip(event, lines);
+    })
+    .on("mouseleave", hideTooltip);
+
+  g.append("g")
+    .selectAll("rect")
+    .data(batchData.cells.filter((d) => d.wave === activeAssignment.wave && d.globalLinear !== activeLinear))
+    .join("rect")
+    .attr("x", (d) => d.n * cellSize + Math.max(0.7, cellSize * 0.09))
+    .attr("y", (d) => d.m * cellSize + Math.max(0.7, cellSize * 0.09))
+    .attr("width", Math.max(0, cellSize - 2 * Math.max(0.7, cellSize * 0.09)))
+    .attr("height", Math.max(0, cellSize - 2 * Math.max(0.7, cellSize * 0.09)))
+    .attr("rx", Math.min(4, cellSize * 0.14))
+    .attr("fill", "none")
+    .attr("stroke", waveStroke)
+    .attr("stroke-width", Math.max(1, cellSize * 0.08))
+    .attr("stroke-dasharray", `${Math.max(2, cellSize * 0.24)} ${Math.max(1.4, cellSize * 0.12)}`)
+    .attr("pointer-events", "none");
+
+  if (batchData.cells.length <= 180) {
+    g.selectAll("text")
+      .data(batchData.cells)
+      .join("text")
+      .attr("class", "tile-label")
+      .attr("x", (d) => d.n * cellSize + cellSize * 0.5)
+      .attr("y", (d) => d.m * cellSize + cellSize * 0.58)
+      .attr("text-anchor", "middle")
+      .attr("fill", (d) => contrastColor(getSlotColor(d.slot, scheduler.launchedBlocks)))
+      .attr("stroke", (d) => contrastStroke(getSlotColor(d.slot, scheduler.launchedBlocks)))
+      .attr("stroke-width", clamp(cellSize * 0.05, 0.85, 1.5))
+      .attr("font-weight", 700)
+      .attr("font-size", labelSize)
+      .text((d) => (d.inBounds ? d.slot : "p"));
+  }
+
+  svg
+    .append("text")
+    .attr("x", originX - 18)
+    .attr("y", originY + (padded.tiles_m * cellSize) * 0.5)
+    .attr("text-anchor", "middle")
+    .attr("dominant-baseline", "middle")
+    .attr("transform", `rotate(-90 ${originX - 18} ${originY + (padded.tiles_m * cellSize) * 0.5})`)
+    .attr("fill", chartTheme.axis)
+    .attr("font-size", 12)
+    .text("M tiles");
+
+  svg
+    .append("text")
+    .attr("x", originX + (padded.tiles_n * cellSize) * 0.5)
+    .attr("y", originY + padded.tiles_m * cellSize + 22)
+    .attr("text-anchor", "middle")
+    .attr("fill", chartTheme.axis)
+    .attr("font-size", 12)
+    .text("N tiles");
+
+  svg
+    .append("text")
+    .attr("x", originX)
+    .attr("y", 18)
+    .attr("fill", chartTheme.axis)
+    .attr("font-size", 11)
+    .text(
+      `CUTLASS SM90 ${formatSchedulerSource(scheduler)}: wave ${activeAssignment.wave} tiles outlined with dashes are claimed in the same parallel pass`
+    );
+}
+
+function renderSmOccupancyMap() {
+  if (!els.smOccupancyMap) {
+    return;
+  }
+
+  const chartTheme = getChartTheme();
+  const r = state.rasterizer;
+  const { scheduler, slotStats } = getH100GlobalModel();
+  const active = getPersistentAssignment(currentLinearIndex(), scheduler);
+
+  const svg = d3.select(els.smOccupancyMap);
+  svg.selectAll("*").remove();
+
+  const { width, height } = getSvgViewportSize(els.smOccupancyMap);
+  const columns = 12;
+  const rows = Math.ceil(H100_SM_COUNT / columns);
+  const margin = { top: 36, right: 28, bottom: 24, left: 28 };
+  const cellGap = 10;
+  const cellWidth = (width - margin.left - margin.right - cellGap * (columns - 1)) / columns;
+  const cellHeight = (height - margin.top - margin.bottom - cellGap * (rows - 1)) / rows;
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  g.selectAll("g.slot")
+    .data(slotStats)
+    .join("g")
+    .attr("class", "slot")
+    .attr("transform", (d) => {
+      const col = d.slot % columns;
+      const row = Math.trunc(d.slot / columns);
+      return `translate(${col * (cellWidth + cellGap)},${row * (cellHeight + cellGap)})`;
+    })
+    .each(function drawSlot(d) {
+      const slot = d3.select(this);
+      const fill = d.active
+        ? getSlotColor(d.slot, scheduler.launchedBlocks)
+        : blendColors(chartTheme.paddedFill, cssVar("--surface-muted", "#eef2f8"), 0.38);
+      const textColor = contrastColor(fill);
+      const textStroke = contrastStroke(fill);
+      const titleY = Math.max(13, Math.min(18, cellHeight * 0.3));
+      const middleY = Math.max(titleY + 12, Math.min(cellHeight - 14, cellHeight * 0.58));
+      const bottomY = cellHeight - 8;
+      const titleSize = clamp(Math.min(cellWidth, cellHeight) * 0.22, 9, 11);
+      const bodySize = clamp(Math.min(cellWidth, cellHeight) * 0.18, 8, 10);
+      const strokeWidth = clamp(cellHeight * 0.03, 0.7, 1.2);
+      const showThirdLine = cellHeight >= 44;
+      const liveLine = d.active ? `${d.logicalAssigned} tiles` : "idle";
+      const waveLine = d.active ? `wave ${d.waveMin ?? 0}-${d.waveMax ?? 0}` : "";
+
+      slot
+        .append("rect")
+        .attr("width", cellWidth)
+        .attr("height", cellHeight)
+        .attr("rx", 12)
+        .attr("fill", fill)
+        .attr("stroke", d.slot === active.slot ? chartTheme.active : chartTheme.tileStroke)
+        .attr("stroke-width", d.slot === active.slot ? 2.4 : 1)
+        .style("cursor", d.active && d.firstLogicalTile ? "pointer" : "default")
+        .on("click", () => {
+          if (!d.active || !d.firstLogicalTile) {
+            return;
+          }
+          state.batch = d.firstLogicalTile.l;
+          state.localLinearIndex = d.firstLogicalTile.linear % r.tilesPerBatch();
+          els.batch.value = String(state.batch);
+          els.linearIndex.value = String(state.localLinearIndex);
+          renderAll();
+        })
+        .on("mousemove", (event) => {
+          if (!d.active) {
+            showTooltip(event, [
+              `slot ${d.slot}: idle`,
+              `CUTLASS launches ${scheduler.launchedBlocks} of 132 possible H100 slots for this problem.`
+            ]);
+            return;
+          }
+
+          const lines = [
+            `slot ${d.slot}  blockIdx=(${d.block.x}, ${d.block.y})`,
+            `assigned tiles: ${d.logicalAssigned} logical + ${d.paddedAssigned} padded`,
+            `waves: ${d.waveMin ?? 0}..${d.waveMax ?? 0}`,
+            d.firstLogicalTile
+              ? `first logical tile: (m=${d.firstLogicalTile.m}, n=${d.firstLogicalTile.n}, l=${d.firstLogicalTile.l})`
+              : "first logical tile: none"
+          ];
+
+          for (const sample of d.samples) {
+            lines.push(`sample -> (m=${sample.m}, n=${sample.n}, l=${sample.l}) @ wave ${sample.wave}`);
+          }
+
+          showTooltip(event, lines);
+        })
+        .on("mouseleave", hideTooltip);
+
+      slot
+        .append("text")
+        .attr("x", 10)
+        .attr("y", titleY)
+        .attr("fill", textColor)
+        .attr("stroke", textStroke)
+        .attr("stroke-width", strokeWidth)
+        .attr("font-family", "JetBrains Mono, monospace")
+        .attr("font-size", titleSize)
+        .attr("font-weight", 700)
+        .text(`B${d.slot}`);
+
+      slot
+        .append("text")
+        .attr("x", 10)
+        .attr("y", middleY)
+        .attr("fill", textColor)
+        .attr("stroke", textStroke)
+        .attr("stroke-width", strokeWidth)
+        .attr("font-family", "JetBrains Mono, monospace")
+        .attr("font-size", bodySize)
+        .attr("font-weight", 600)
+        .text(liveLine);
+
+      if (showThirdLine) {
+        slot
+          .append("text")
+          .attr("x", 10)
+          .attr("y", bottomY)
+          .attr("fill", textColor)
+          .attr("stroke", textStroke)
+          .attr("stroke-width", strokeWidth)
+          .attr("font-family", "JetBrains Mono, monospace")
+          .attr("font-size", bodySize)
+          .attr("font-weight", 600)
+          .text(waveLine);
+      }
+    });
+
+  svg
+    .append("text")
+    .attr("x", 20)
+    .attr("y", 18)
+    .attr("fill", chartTheme.axis)
+    .attr("font-size", 11)
+    .text(() => {
+      const remainingTiles = Math.max(0, scheduler.totalTiles - active.wave * scheduler.launchedBlocks);
+      const activeWaveWidth = Math.min(scheduler.launchedBlocks, remainingTiles);
+      return `CUTLASS SM90 ${formatSchedulerSource(scheduler)}: wave ${active.wave} runs up to ${activeWaveWidth} tile${activeWaveWidth === 1 ? "" : "s"} across ${scheduler.launchedBlocks} resident blocks, then each slot jumps by +${scheduler.launchedBlocks}`;
+    });
+}
+
 function renderAll() {
   hideTooltip();
+  renderGeometryInfo();
   renderStats();
   renderDecodeInfo();
   renderTileMap();
   renderClusterMap();
+  renderH100Summary();
+  renderBlockAssignmentMap();
+  renderSmOccupancyMap();
 }
 
 function rebuildMapping() {
@@ -1346,8 +2133,11 @@ function rebuildMapping() {
     raster_order: els.rasterOrder.value
   };
 
+  state.geometry = buildGeometry(problem);
   state.rasterizer = new Rasterizer(problem, cluster, options);
   state.batchCache.clear();
+  state.h100BatchCache.clear();
+  state.h100Global = null;
   state.selfCheck = runSelfCheck(state.rasterizer);
 
   state.batch = clamp(state.batch, 0, problem.batches - 1);
@@ -1388,6 +2178,11 @@ els.linearIndex.addEventListener("input", () => {
   renderAll();
 });
 
+if (els.tabTraversal && els.tabH100) {
+  els.tabTraversal.addEventListener("click", () => setActiveTab("traversal"));
+  els.tabH100.addEventListener("click", () => setActiveTab("h100"));
+}
+
 if (els.themeToggle) {
   els.themeToggle.addEventListener("click", () => {
     const nextTheme = currentTheme() === THEME_DARK ? THEME_LIGHT : THEME_DARK;
@@ -1396,4 +2191,5 @@ if (els.themeToggle) {
 }
 
 initializeTheme();
+setActiveTab(state.activeTab);
 rebuildMapping();

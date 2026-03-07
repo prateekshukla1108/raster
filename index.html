@@ -1,163 +1,224 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Rasterization + Swizzle Visualizer</title>
-    <meta
-      name="description"
-      content="Interactive CUDA-style tile scheduling and swizzle visualizer powered by D3.js"
-    />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <div class="page-shell">
-      <header class="hero">
-        <p class="hero-kicker">CUDA Tile Scheduling Studio</p>
-        <div class="hero-main">
-          <div class="hero-copy">
-            <h1>Rasterization + Swizzle Visualizer</h1>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rasterization + Swizzle Visualizer</title>
+  <meta name="description"
+    content="Interactive CUDA-style tile scheduling, swizzle, and persistent parallel block-mapping visualizer powered by D3.js" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <p class="hero-kicker">CUDA Tile Scheduling Studio</p>
+      <div class="hero-main">
+        <div class="hero-copy">
+          <h1>Rasterization + Swizzle Visualizer</h1>
+          <p>
+            Interactive deep-dive into raster order, padded grids, swizzled cluster IDs, and
+            persistent block mapping from <code>rasterization.cu</code>.
+          </p>
+        </div>
+        <div class="hero-meta" aria-label="Feature badges and theme controls">
+          <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle theme" aria-pressed="false">
+            Dark Mode
+          </button>
+          <span class="badge">CUDA Mapping</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- ── TOOLBAR ROW: config + playback + decode ── -->
+      <div class="toolbar">
+        <section class="toolbar-card" aria-labelledby="cfg-title">
+          <div class="section-head">
+            <h2 id="cfg-title">Configuration</h2>
+            <p>Tune logical shape, cluster shape, swizzle behavior, and the optional SM90 <code>max_active_clusters</code> cap.</p>
+          </div>
+          <div class="grid-controls">
+            <label for="tilesM">Tiles M <input type="number" id="tilesM" min="1" max="256" value="8" /></label>
+            <label for="tilesN">Tiles N <input type="number" id="tilesN" min="1" max="256" value="16" /></label>
+            <label for="tileSizeM">CTA Tile M <input type="number" id="tileSizeM" min="16" max="2048" step="16"
+                value="128" /></label>
+            <label for="tileSizeN">CTA Tile N <input type="number" id="tileSizeN" min="16" max="2048" step="16"
+                value="128" /></label>
+            <label for="batches">Batches <input type="number" id="batches" min="1" max="8" value="1" /></label>
+            <label for="clusterM">Cluster M <input type="number" id="clusterM" min="1" max="8" value="1" /></label>
+            <label for="clusterN">Cluster N <input type="number" id="clusterN" min="1" max="8" value="2" /></label>
+            <label for="maxActiveClusters">Max Active Clusters
+              <input type="number" id="maxActiveClusters" min="0" max="132" value="0" />
+            </label>
+            <label for="maxSwizzle">Max Swizzle
+              <select id="maxSwizzle">
+                <option value="1">1</option>
+                <option value="2" selected>2</option>
+                <option value="4">4</option>
+                <option value="8">8</option>
+              </select>
+            </label>
+            <label for="rasterOrder">Raster Order
+              <select id="rasterOrder">
+                <option value="Heuristic" selected>Heuristic</option>
+                <option value="AlongM">AlongM</option>
+                <option value="AlongN">AlongN</option>
+              </select>
+            </label>
+            <button id="rebuild">Rebuild Mapping</button>
+          </div>
+          <div id="geometryInfo" class="geometry-info" aria-live="polite"></div>
+        </section>
+
+        <section class="toolbar-card" aria-labelledby="pb-title">
+          <div class="section-head">
+            <h2 id="pb-title">Traversal Playback</h2>
+            <p>Scrub through the decode path tile-by-tile.</p>
+          </div>
+          <div class="play-row">
+            <button id="playPause">Play</button>
+            <label for="speed">Speed
+              <input type="range" id="speed" min="20" max="600" value="160" />
+            </label>
+            <label for="batch">Batch
+              <input type="range" id="batch" min="0" max="0" step="1" value="0" />
+            </label>
+          </div>
+          <label class="wide" for="linearIndex">Linear Index
+            <input type="range" id="linearIndex" min="0" max="0" step="1" value="0" />
+          </label>
+        </section>
+
+        <section class="toolbar-card" aria-labelledby="logic-title">
+          <div class="section-head">
+            <h2 id="logic-title">Linear Index Decode</h2>
+            <p>Current index decode + encode round-trip details.</p>
+          </div>
+          <div id="decodeInfo" class="decode-info" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+
+      <!-- ── TAB BAR ── -->
+      <div class="tab-strip" role="tablist" aria-label="Visualization tabs">
+        <button id="tabTraversal" class="tab-button active" type="button" role="tab" aria-selected="true"
+          aria-controls="tabTraversalPanel">
+          Traversal + Swizzle
+        </button>
+        <button id="tabH100" class="tab-button" type="button" role="tab" aria-selected="false"
+          aria-controls="tabH100Panel">
+          H100 Parallel Mapping
+        </button>
+      </div>
+
+      <!-- ── TAB: Traversal + Swizzle ── -->
+      <div id="tabTraversalPanel" class="tab-panel active" role="tabpanel" aria-labelledby="tabTraversal">
+        <section class="viz-card" aria-labelledby="tile-title">
+          <div class="chart-head">
+            <div>
+              <h2 id="tile-title">Tile Traversal</h2>
+              <p class="hint">A/B slice highlights show the active C-tile dependencies for the selected step.</p>
+            </div>
+            <div class="legend">
+              <span><i class="swatch order"></i>Traversal order</span>
+              <span><i class="swatch aslice"></i>A slice</span>
+              <span><i class="swatch bslice"></i>B slice</span>
+              <span><i class="swatch padded"></i>Padded tile</span>
+              <span><i class="swatch active"></i>Current C tile</span>
+            </div>
+          </div>
+          <svg id="tileMap" width="900" height="530" aria-label="Tile traversal map"></svg>
+        </section>
+
+        <section class="viz-card" aria-labelledby="cluster-title">
+          <div class="chart-head">
+            <div>
+              <h2 id="cluster-title">Cluster Swizzle View</h2>
+              <p class="hint">Cluster decode/encode flow sorted by effective swizzle rank.</p>
+            </div>
+            <div class="legend">
+              <span><i class="swatch cluster"></i>Swizzle rank</span>
+              <span><i class="swatch active"></i>Active cluster</span>
+            </div>
+          </div>
+          <svg id="clusterMap" width="900" height="340" aria-label="Cluster swizzle map"></svg>
+        </section>
+      </div>
+
+      <!-- ── TAB: H100 Block Mapping ── -->
+      <div id="tabH100Panel" class="tab-panel" role="tabpanel" aria-labelledby="tabH100" hidden>
+        <section class="viz-card h100-panel" aria-labelledby="h100-title">
+          <div class="section-head">
+            <h2 id="h100-title">H100 Persistent Scheduler</h2>
             <p>
-              Interactive deep-dive into raster order, padded grids, and swizzled cluster IDs from
-              <code>rasterization.cu</code>.
+              Mirrors CUTLASS SM90 scheduling: output is divided into swizzled CTA tiles,
+              <code>get_grid_shape()</code> honors <code>hw_info.max_active_clusters</code> when
+              provided and otherwise falls back to the 18-SM/GPC occupancy heuristic, then each
+              resident block advances by one full-grid stride to fetch more work.
             </p>
           </div>
-          <div class="hero-meta" aria-label="Feature badges and theme controls">
-            <button
-              id="themeToggle"
-              class="theme-toggle"
-              type="button"
-              aria-label="Toggle theme"
-              aria-pressed="false"
-            >
-              Dark Mode
-            </button>
-            <span class="badge">CUDA Mapping</span>
-          </div>
-        </div>
-      </header>
-
-      <main class="layout">
-        <section class="pane pane-main" aria-labelledby="workbench-title">
-          <div class="pane-head">
-            <h2 id="workbench-title">Visualization Workbench</h2>
-            <p>Configuration, traversal controls, and both visual maps in one pane.</p>
-          </div>
-          <div class="pane-split">
-            <section class="pane-block controls" aria-labelledby="cfg-title">
-              <div class="section-head">
-                <h2 id="cfg-title">Configuration</h2>
-                <p>Tune logical shape, cluster shape, and swizzle behavior.</p>
-              </div>
-              <div class="grid-controls">
-                <label for="tilesM">Tiles M <input type="number" id="tilesM" min="1" max="256" value="8" /></label>
-                <label for="tilesN">Tiles N <input type="number" id="tilesN" min="1" max="256" value="16" /></label>
-                <label for="batches">Batches <input type="number" id="batches" min="1" max="8" value="1" /></label>
-                <label for="clusterM">Cluster M <input type="number" id="clusterM" min="1" max="8" value="1" /></label>
-                <label for="clusterN">Cluster N <input type="number" id="clusterN" min="1" max="8" value="2" /></label>
-                <label for="maxSwizzle">Max Swizzle
-                  <select id="maxSwizzle">
-                    <option value="1">1</option>
-                    <option value="2" selected>2</option>
-                    <option value="4">4</option>
-                    <option value="8">8</option>
-                  </select>
-                </label>
-                <label for="rasterOrder">Raster Order
-                  <select id="rasterOrder">
-                    <option value="Heuristic" selected>Heuristic</option>
-                    <option value="AlongM">AlongM</option>
-                    <option value="AlongN">AlongN</option>
-                  </select>
-                </label>
-                <button id="rebuild">Rebuild Mapping</button>
-              </div>
-            </section>
-
-            <section class="pane-block playback" aria-labelledby="pb-title">
-              <div class="section-head">
-                <h2 id="pb-title">Traversal Playback</h2>
-                <p>Scrub through the decode path tile-by-tile.</p>
-              </div>
-              <div class="play-row">
-                <button id="playPause">Play</button>
-                <label for="speed">Speed
-                  <input type="range" id="speed" min="20" max="600" value="160" />
-                </label>
-                <label for="batch">Batch
-                  <input type="range" id="batch" min="0" max="0" step="1" value="0" />
-                </label>
-              </div>
-              <label class="wide" for="linearIndex">Linear Index
-                <input type="range" id="linearIndex" min="0" max="0" step="1" value="0" />
-              </label>
-            </section>
-          </div>
-
-          <section class="pane-block chart-panel" aria-labelledby="tile-title">
-            <div class="chart-head">
-              <div>
-                <h2 id="tile-title">Tile Traversal</h2>
-                <p class="hint">A/B slice highlights show the active C-tile dependencies for the selected step.</p>
-              </div>
-              <div class="legend">
-                <span><i class="swatch order"></i>Traversal order</span>
-                <span><i class="swatch aslice"></i>A slice</span>
-                <span><i class="swatch bslice"></i>B slice</span>
-                <span><i class="swatch padded"></i>Padded tile</span>
-                <span><i class="swatch active"></i>Current C tile</span>
-              </div>
-            </div>
-            <svg id="tileMap" width="900" height="530" aria-label="Tile traversal map"></svg>
-          </section>
-
-          <section class="pane-block chart-panel" aria-labelledby="cluster-title">
-            <div class="chart-head">
-              <div>
-                <h2 id="cluster-title">Cluster Swizzle View</h2>
-                <p class="hint">Cluster decode/encode flow sorted by effective swizzle rank.</p>
-              </div>
-              <div class="legend">
-                <span><i class="swatch cluster"></i>Swizzle rank</span>
-                <span><i class="swatch active"></i>Active cluster</span>
-              </div>
-            </div>
-            <svg id="clusterMap" width="900" height="340" aria-label="Cluster swizzle map"></svg>
-          </section>
+          <div id="h100Summary" class="h100-summary" aria-live="polite"></div>
         </section>
 
-        <section class="pane pane-logic" aria-labelledby="logic-pane-title">
-          <div class="pane-head">
-            <h2 id="logic-pane-title">Logic + Derived State</h2>
-            <p>Linear index decode trace and derived metrics together in one pane.</p>
-          </div>
-
-          <section class="pane-block logic-panel" aria-labelledby="logic-title">
+        <section class="viz-card" aria-labelledby="block-map-title">
+          <div class="chart-head">
             <div>
-              <h2 id="logic-title">Linear Index Decode</h2>
-              <p class="hint">Current index decode + encode round-trip details.</p>
+              <h2 id="block-map-title">Tile Workload Split Across Blocks</h2>
+              <p class="hint">
+                Color = persistent block slot. Dashed outlines mark tiles in the same selected
+                wave, which means those resident blocks can execute them concurrently. Padded tiles
+                still get a slot, but they are muted because they fall outside the logical matrix.
+              </p>
             </div>
-            <div id="decodeInfo" class="decode-info" role="log" aria-live="polite"></div>
-          </section>
-
-          <section class="pane-block stats" id="statsPanel" aria-labelledby="stats-title"></section>
+            <div class="legend">
+              <span><i class="swatch slot"></i>Block slot</span>
+              <span><i class="swatch wave"></i>Same wave = parallel</span>
+              <span><i class="swatch padded"></i>Padded tile</span>
+              <span><i class="swatch active"></i>Selected tile</span>
+            </div>
+          </div>
+          <svg id="blockAssignmentMap" width="900" height="500" aria-label="Tile to H100 block assignment map"></svg>
         </section>
-      </main>
 
-      <footer>
-        Logic mirrored from <code>/rasterization.cu</code>: padded grid alignment, raster order
-        selection, and swizzled cluster ID math.
-      </footer>
-    </div>
+        <section class="viz-card" aria-labelledby="slot-map-title">
+          <div class="chart-head">
+            <div>
+              <h2 id="slot-map-title">132 Resident Parallel Block Slots</h2>
+              <p class="hint">
+                Compact view of the H100 persistent slots. Each cell is one concurrently resident
+                worker sized from CUTLASS <code>hw_info.sm_count</code>; together they form the
+                parallel wave width.
+              </p>
+            </div>
+            <div class="legend">
+              <span><i class="swatch slot"></i>Launched slot</span>
+              <span><i class="swatch idle"></i>Idle slot</span>
+              <span><i class="swatch active"></i>Selected slot</span>
+            </div>
+          </div>
+          <svg id="smOccupancyMap" width="900" height="580" aria-label="H100 resident block slot map"></svg>
+        </section>
+      </div>
 
-    <div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>
+      <!-- ── DERIVED STATE (stats) ── -->
+      <section class="stats-row" id="statsPanel" aria-labelledby="stats-title"></section>
+    </main>
 
-    <script type="module" src="./app.js"></script>
-  </body>
+    <footer>
+      Logic mirrored from <code>/rasterization.cu</code>: padded grid alignment, raster order
+      selection, swizzled cluster ID math, and persistent block-to-tile stepping.
+    </footer>
+  </div>
+
+  <div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+
 </html>
