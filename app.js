@@ -312,6 +312,10 @@ const els = {
   themeToggle: document.getElementById("themeToggle")
 };
 
+const PLAYBACK_SPEED_MIN = 20;
+const PLAYBACK_SPEED_MAX = 600;
+const PLAYBACK_SPEED_DEFAULT = 460;
+
 const state = {
   rasterizer: null,
   geometry: null,
@@ -847,12 +851,21 @@ function stopPlayback() {
   els.playPause.textContent = "Play";
 }
 
+function playbackDelayMs() {
+  const speedValue = readInt(
+    els.speed,
+    PLAYBACK_SPEED_DEFAULT,
+    PLAYBACK_SPEED_MIN,
+    PLAYBACK_SPEED_MAX
+  );
+  return PLAYBACK_SPEED_MIN + PLAYBACK_SPEED_MAX - speedValue;
+}
+
 function startPlayback() {
   stopPlayback();
   state.playing = true;
   els.playPause.textContent = "Pause";
 
-  const speedMs = readInt(els.speed, 160, 20, 600);
   state.timer = setInterval(() => {
     const next = state.localLinearIndex + 1;
     if (next >= state.rasterizer.tilesPerBatch()) {
@@ -865,7 +878,7 @@ function startPlayback() {
 
     els.linearIndex.value = String(state.localLinearIndex);
     renderAll();
-  }, speedMs);
+  }, playbackDelayMs());
 }
 
 function getBatchData(batch) {
